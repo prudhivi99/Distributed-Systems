@@ -10,10 +10,10 @@ import (
 )
 
 type ProductHandler struct {
-	repo *db.ProductRepository
+	repo *db.CachedProductRepository
 }
 
-func NewProductHandler(repo *db.ProductRepository) *ProductHandler {
+func NewProductHandler(repo *db.CachedProductRepository) *ProductHandler {
 	return &ProductHandler{repo: repo}
 }
 
@@ -24,7 +24,7 @@ func (h *ProductHandler) HealthCheck(c *gin.Context) {
 
 // ListProducts returns all products
 func (h *ProductHandler) ListProducts(c *gin.Context) {
-	products, err := h.repo.GetAll()
+	products, err := h.repo.GetAll(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -41,7 +41,7 @@ func (h *ProductHandler) GetProduct(c *gin.Context) {
 		return
 	}
 
-	product, err := h.repo.GetByID(id)
+	product, err := h.repo.GetByID(c.Request.Context(), id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -63,7 +63,7 @@ func (h *ProductHandler) CreateProduct(c *gin.Context) {
 		return
 	}
 
-	product, err := h.repo.Create(req)
+	product, err := h.repo.Create(c.Request.Context(), req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -80,7 +80,7 @@ func (h *ProductHandler) DeleteProduct(c *gin.Context) {
 		return
 	}
 
-	err = h.repo.Delete(id)
+	err = h.repo.Delete(c.Request.Context(), id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
