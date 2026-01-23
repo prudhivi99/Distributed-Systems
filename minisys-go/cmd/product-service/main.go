@@ -18,7 +18,7 @@ func main() {
 	}
 	defer database.Close()
 
-	// Connect to Redis (5 minute TTL)
+	// Connect to Redis
 	redisCache, err := cache.NewRedisCache("localhost", 6379, 5*time.Minute)
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
@@ -42,7 +42,7 @@ func main() {
 	router.POST("/products", productHandler.CreateProduct)
 	router.DELETE("/products/:id", productHandler.DeleteProduct)
 
-	// Start server
-	log.Println("🚀 Product Service starting on http://localhost:8080")
-	router.Run(":8080")
+	// Start server on port 8081
+	log.Println("🚀 Product Service starting on http://localhost:8081")
+	router.Run(":8081")
 }

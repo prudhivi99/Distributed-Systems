@@ -17,8 +17,8 @@ func main() {
 	}
 	defer database.Close()
 
-	// Create Product Service client
-	productClient := client.NewProductClient("http://localhost:8080")
+	// Create Product Service client (internal communication)
+	productClient := client.NewProductClient("http://localhost:8081")
 
 	// Create repository and handler
 	orderRepo := db.NewOrderRepository(database)
@@ -34,7 +34,7 @@ func main() {
 	router.POST("/orders", orderHandler.CreateOrder)
 	router.PATCH("/orders/:id/status", orderHandler.UpdateOrderStatus)
 
-	// Start server on port 8081
-	log.Println("🚀 Order Service starting on http://localhost:8081")
-	router.Run(":8081")
+	// Start server on port 8082
+	log.Println("🚀 Order Service starting on http://localhost:8082")
+	router.Run(":8082")
 }
