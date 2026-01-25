@@ -1,14 +1,13 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"log"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/cache"
+	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/consumer"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/db"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/handlers"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/messaging"
@@ -43,8 +42,8 @@ func main() {
 	// Create handler
 	productHandler := handlers.NewProductHandler(cachedRepo)
 
-	// Start event consumer in goroutine
-	go startEventConsumer(rabbitMQ, productRepo)
+	// Start event consumer in goroutine (pass cache for invalidation)
+	go startEventConsumer(rabbitMQ, productRepo, redisCache)
 
 	// Setup router
 	router := gin.Default()
@@ -63,62 +62,17 @@ func main() {
 
 func startEventConsumer(mq *messaging.RabbitMQ, repo *db.ProductRepository, cache *cache.RedisCache) {
 	// Declare queue
-	err := mq.DeclareQueue("order.created")
-	if err != nil {
+	if err := mq.DeclareQueue("order.created"); err != nil {
 		log.Fatalf("Failed to declare queue: %v", err)
 	}
 
-	// Start consuming messages
+	// Start consuming
 	messages, err := mq.Consume("order.created")
 	if err != nil {
 		log.Fatalf("Failed to consume messages: %v", err)
 	}
 
-	log.Println("👂 Listening on queue: order.created")
-
-	// Process messages in loop
-	for msg := range messages {
-		var orderEvent map[string]interface{}
-		err := json.Unmarshal(msg.Body, &orderEvent)
-		if err != nil {
-			log.Printf("❌ Failed to unmarshal event: %v", err)
-			msg.Ack(false)
-			continue
-		}
-
-		log.Printf("📥 Received event: %v", orderEvent)
-
-		// Safely extract fields with type checking
-		productIDVal, ok := orderEvent["product_id"]
-		if !ok {
-			log.Printf("⚠️ Missing product_id in event")
-			msg.Ack(false)
-			continue
-		}
-
-		quantityVal, ok := orderEvent["quantity"]
-		if !ok {
-			log.Printf("⚠️ Missing quantity in event")
-			msg.Ack(false)
-			continue
-		}
-
-		productID := int(productIDVal.(float64))
-		quantity := int(quantityVal.(float64))
-
-		log.Printf("📥 Received order event: product_id=%d, quantity=%d", productID, quantity)
-
-		// Update product quantity in DB
-		err = repo.UpdateQuantity(productID, -quantity)
-		if err != nil {
-			log.Printf("❌ Failed to update quantity: %v", err)
-		} else {
-			log.Printf("✅ Updated product %d: quantity decreased by %d", productID, quantity)
-			// Clear cache for this product
-			cache.Delete(fmt.Sprintf("product:%d", productID))
-			log.Printf("🗑️ Cleared cache for product %d", productID)
-		}
-
-		msg.Ack(false)
-	}
+	// Process messages (pass cache for invalidation)
+	inventoryConsumer := consumer.NewInventoryConsumer(repo, cache)
+	inventoryConsumer.ProcessOrderCreated(messages)
 }
