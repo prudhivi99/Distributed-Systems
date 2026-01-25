@@ -9,17 +9,20 @@ import (
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/client"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/db"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/models"
+	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/publisher"
 )
 
 type OrderHandler struct {
 	repo          *db.OrderRepository
 	productClient *client.ProductClient
+	publisher     *publisher.OrderPublisher
 }
 
-func NewOrderHandler(repo *db.OrderRepository, productClient *client.ProductClient) *OrderHandler {
+func NewOrderHandler(repo *db.OrderRepository, productClient *client.ProductClient, pub *publisher.OrderPublisher) *OrderHandler {
 	return &OrderHandler{
 		repo:          repo,
 		productClient: productClient,
+		publisher:     pub,
 	}
 }
 
@@ -69,7 +72,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 
-	// Build order with product details from Product Service
+	// Build order with product details
 	order := models.Order{
 		CustomerName: req.CustomerName,
 		Status:       "pending",
@@ -78,8 +81,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	var totalAmount float64
 
 	for _, item := range req.Items {
-		// Call Product Service to get product details
-		log.Printf("📞 Calling Product Service for product %d", item.ProductID)
+		log.Printf("📞 Fetching product %d from Product Service", item.ProductID)
 		product, err := h.productClient.GetProduct(item.ProductID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -105,7 +107,15 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 
-	log.Printf("✅ Order %d created with total $%.2f", order.ID, order.TotalAmount)
+	// Publish order.created event
+	if err := h.publisher.PublishOrderCreated(&order); err != nil {
+		log.Printf("⚠️ Failed to publish event: %v", err)
+		// Don't fail the request, order is already created
+	} else {
+		log.Printf("📤 Published order.created event for Order #%d", order.ID)
+	}
+
+	log.Printf("✅ Order #%d created with total $%.2f", order.ID, order.TotalAmount)
 	c.JSON(http.StatusCreated, order)
 }
 
@@ -125,7 +135,6 @@ func (h *OrderHandler) UpdateOrderStatus(c *gin.Context) {
 		return
 	}
 
-	// Validate status
 	validStatuses := map[string]bool{
 		"pending":   true,
 		"confirmed": true,

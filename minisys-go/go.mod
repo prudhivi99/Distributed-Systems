@@ -7,6 +7,7 @@ toolchain go1.24.12
 require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/lib/pq v1.10.9
+	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/redis/go-redis/v9 v9.17.2
 )
 

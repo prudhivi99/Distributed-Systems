@@ -46,7 +46,7 @@ func (r *ProductRepository) GetByID(id int) (*models.Product, error) {
 	err := r.db.QueryRow(query, id).Scan(&p.ID, &p.Name, &p.Price, &p.Quantity, &p.CreatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, nil // Not found
+			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get product: %w", err)
 	}
@@ -84,6 +84,23 @@ func (r *ProductRepository) Delete(id int) error {
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		return fmt.Errorf("product not found")
+	}
+
+	return nil
+}
+
+// UpdateQuantity updates product inventory
+func (r *ProductRepository) UpdateQuantity(id int, quantityChange int) error {
+	query := `UPDATE products SET quantity = quantity + $1 WHERE id = $2 AND quantity + $1 >= 0`
+
+	result, err := r.db.Exec(query, quantityChange, id)
+	if err != nil {
+		return fmt.Errorf("failed to update quantity: %w", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("product not found or insufficient inventory")
 	}
 
 	return nil
