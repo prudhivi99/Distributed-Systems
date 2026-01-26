@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/cache"
+	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/config"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/consumer"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/db"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/discovery"
@@ -20,33 +21,36 @@ import (
 const (
 	serviceName = "product-service"
 	serviceID   = "product-service-1"
-	servicePort = 8081
 )
 
 func main() {
+	// Load configuration
+	cfg := config.Load()
+	servicePort := 8081
+
 	// Connect to PostgreSQL
-	database, err := db.NewPostgresDB("localhost", 5432, "minisys", "minisys123", "minisys")
+	database, err := db.NewPostgresDB(cfg.PostgresHost, cfg.PostgresPort, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer database.Close()
 
 	// Connect to Redis
-	redisCache, err := cache.NewRedisCache("localhost", 6379, 5*time.Minute)
+	redisCache, err := cache.NewRedisCache(cfg.RedisHost, cfg.RedisPort, 5*time.Minute)
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 	defer redisCache.Close()
 
 	// Connect to RabbitMQ
-	rabbitMQ, err := messaging.NewRabbitMQ("localhost", 5672, "guest", "guest")
+	rabbitMQ, err := messaging.NewRabbitMQ(cfg.RabbitMQHost, cfg.RabbitMQPort, cfg.RabbitMQUser, cfg.RabbitMQPassword)
 	if err != nil {
 		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
 	}
 	defer rabbitMQ.Close()
 
 	// Connect to Consul
-	consul, err := discovery.NewConsulClient("localhost", 8500)
+	consul, err := discovery.NewConsulClient(cfg.ConsulHost, cfg.ConsulPort)
 	if err != nil {
 		log.Fatalf("Failed to connect to Consul: %v", err)
 	}
@@ -92,8 +96,7 @@ func main() {
 	router.DELETE("/products/:id", productHandler.DeleteProduct)
 
 	// Start server
-	log.Printf("🚀 %s starting on http://localhost:%d", serviceName, servicePort)
-	log.Println("   Registered with Consul")
+	log.Printf("🚀 %s starting on http://0.0.0.0:%d", serviceName, servicePort)
 	router.Run(":8081")
 }
 
