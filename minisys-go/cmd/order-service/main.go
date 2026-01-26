@@ -2,13 +2,23 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/client"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/db"
+	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/discovery"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/handlers"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/messaging"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/publisher"
+)
+
+const (
+	serviceName = "order-service"
+	serviceID   = "order-service-1"
+	servicePort = 8082
 )
 
 func main() {
@@ -26,14 +36,49 @@ func main() {
 	}
 	defer rabbitMQ.Close()
 
+	// Connect to Consul
+	consul, err := discovery.NewConsulClient("localhost", 8500)
+	if err != nil {
+		log.Fatalf("Failed to connect to Consul: %v", err)
+	}
+
+	// Register with Consul
+	err = consul.Register(discovery.ServiceConfig{
+		Name: serviceName,
+		ID:   serviceID,
+		Port: servicePort,
+		Tags: []string{"api", "orders"},
+	})
+	if err != nil {
+		log.Fatalf("Failed to register service: %v", err)
+	}
+
+	// Deregister on shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		log.Println("Shutting down...")
+		consul.Deregister(serviceID)
+		os.Exit(0)
+	}()
+
+	// Discover Product Service from Consul
+	productServiceURL, err := consul.GetServiceURL("product-service")
+	if err != nil {
+		log.Printf("⚠️ Product service not found, using default: %v", err)
+		productServiceURL = "http://localhost:8081"
+	}
+	log.Printf("📍 Discovered product-service at: %s", productServiceURL)
+
 	// Create publisher
 	orderPublisher, err := publisher.NewOrderPublisher(rabbitMQ)
 	if err != nil {
 		log.Fatalf("Failed to create publisher: %v", err)
 	}
 
-	// Create Product Service client (HTTP)
-	productClient := client.NewProductClient("http://localhost:8081")
+	// Create Product Service client (using discovered URL)
+	productClient := client.NewProductClient(productServiceURL)
 
 	// Create repository and handler
 	orderRepo := db.NewOrderRepository(database)
@@ -49,7 +94,7 @@ func main() {
 	router.PATCH("/orders/:id/status", orderHandler.UpdateOrderStatus)
 
 	// Start server
-	log.Println("🚀 Order Service starting on http://localhost:8082")
-	log.Println("   Publishing events to RabbitMQ")
+	log.Printf("🚀 %s starting on http://localhost:%d", serviceName, servicePort)
+	log.Println("   Registered with Consul")
 	router.Run(":8082")
 }

@@ -6,86 +6,128 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/discovery"
 )
 
-// ServiceConfig holds service routing configuration
-type ServiceConfig struct {
-	Name   string
-	URL    string
-	Prefix string
-}
-
-// Gateway handles request routing
+// Gateway handles request routing with service discovery
 type Gateway struct {
-	services map[string]*httputil.ReverseProxy
-	configs  []ServiceConfig
+	consul   *discovery.ConsulClient
+	proxies  map[string]*httputil.ReverseProxy
+	mutex    sync.RWMutex
+	services map[string]string // service name -> current URL
 }
 
-// NewGateway creates a new API Gateway
-func NewGateway(configs []ServiceConfig) *Gateway {
+// NewGateway creates a new API Gateway with Consul integration
+func NewGateway(consul *discovery.ConsulClient) *Gateway {
 	g := &Gateway{
-		services: make(map[string]*httputil.ReverseProxy),
-		configs:  configs,
+		consul:   consul,
+		proxies:  make(map[string]*httputil.ReverseProxy),
+		services: make(map[string]string),
 	}
 
-	for _, cfg := range configs {
-		target, err := url.Parse(cfg.URL)
-		if err != nil {
-			log.Fatalf("Invalid URL for service %s: %v", cfg.Name, err)
-		}
+	// Initial service discovery
+	g.discoverServices()
 
-		proxy := httputil.NewSingleHostReverseProxy(target)
-
-		// Custom error handler
-		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("❌ Proxy error for %s: %v", cfg.Name, err)
-			w.WriteHeader(http.StatusBadGateway)
-			io.WriteString(w, `{"error": "service unavailable"}`)
-		}
-
-		g.services[cfg.Prefix] = proxy
-		log.Printf("✅ Registered route %s/* → %s (%s)", cfg.Prefix, cfg.URL, cfg.Name)
-	}
+	// Watch for service changes
+	go g.watchServices()
 
 	return g
 }
 
-// ProxyRequest forwards request to appropriate service
-func (g *Gateway) ProxyRequest(c *gin.Context) {
-	path := c.Request.URL.Path
+func (g *Gateway) discoverServices() {
+	services := []string{"product-service", "order-service"}
 
-	// Find matching service
-	for _, cfg := range g.configs {
-		if len(path) >= len(cfg.Prefix) && path[:len(cfg.Prefix)] == cfg.Prefix {
-			log.Printf("🔀 Routing %s %s → %s", c.Request.Method, path, cfg.Name)
-
-			proxy := g.services[cfg.Prefix]
-			proxy.ServeHTTP(c.Writer, c.Request)
-			return
+	for _, svc := range services {
+		url, err := g.consul.GetServiceURL(svc)
+		if err != nil {
+			log.Printf("⚠️ Service %s not found: %v", svc, err)
+			continue
 		}
-	}
 
-	c.JSON(http.StatusNotFound, gin.H{"error": "route not found"})
+		g.updateProxy(svc, url)
+	}
 }
 
-// HealthCheck returns gateway status
+func (g *Gateway) updateProxy(serviceName, serviceURL string) {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+
+	target, err := url.Parse(serviceURL)
+	if err != nil {
+		log.Printf("❌ Invalid URL for %s: %v", serviceName, err)
+		return
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("❌ Proxy error for %s: %v", serviceName, err)
+		w.WriteHeader(http.StatusBadGateway)
+		io.WriteString(w, `{"error": "service unavailable"}`)
+	}
+
+	g.proxies[serviceName] = proxy
+	g.services[serviceName] = serviceURL
+	log.Printf("✅ Updated route: %s → %s", serviceName, serviceURL)
+}
+
+func (g *Gateway) watchServices() {
+	ticker := time.NewTicker(10 * time.Second)
+	for range ticker.C {
+		g.discoverServices()
+	}
+}
+
+func (g *Gateway) getProxy(serviceName string) *httputil.ReverseProxy {
+	g.mutex.RLock()
+	defer g.mutex.RUnlock()
+	return g.proxies[serviceName]
+}
+
+// ProxyProducts forwards requests to product-service
+func (g *Gateway) ProxyProducts(c *gin.Context) {
+	proxy := g.getProxy("product-service")
+	if proxy == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "product-service unavailable"})
+		return
+	}
+
+	log.Printf("🔀 Routing %s %s → product-service", c.Request.Method, c.Request.URL.Path)
+	proxy.ServeHTTP(c.Writer, c.Request)
+}
+
+// ProxyOrders forwards requests to order-service
+func (g *Gateway) ProxyOrders(c *gin.Context) {
+	proxy := g.getProxy("order-service")
+	if proxy == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "order-service unavailable"})
+		return
+	}
+
+	log.Printf("🔀 Routing %s %s → order-service", c.Request.Method, c.Request.URL.Path)
+	proxy.ServeHTTP(c.Writer, c.Request)
+}
+
+// HealthCheck returns gateway and services status
 func (g *Gateway) HealthCheck(c *gin.Context) {
-	// Check all services
+	g.mutex.RLock()
+	defer g.mutex.RUnlock()
+
 	statuses := make(map[string]string)
 	allHealthy := true
 
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	for _, cfg := range g.configs {
-		resp, err := client.Get(cfg.URL + "/health")
+	for name, url := range g.services {
+		resp, err := client.Get(url + "/health")
 		if err != nil || resp.StatusCode != http.StatusOK {
-			statuses[cfg.Name] = "unhealthy"
+			statuses[name] = "unhealthy"
 			allHealthy = false
 		} else {
-			statuses[cfg.Name] = "healthy"
+			statuses[name] = "healthy"
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -104,40 +146,41 @@ func (g *Gateway) HealthCheck(c *gin.Context) {
 	})
 }
 
+// ListServices returns all discovered services
+func (g *Gateway) ListServices(c *gin.Context) {
+	g.mutex.RLock()
+	defer g.mutex.RUnlock()
+
+	c.JSON(http.StatusOK, gin.H{
+		"services": g.services,
+	})
+}
+
 func main() {
-	// Service configurations
-	services := []ServiceConfig{
-		{
-			Name:   "product-service",
-			URL:    "http://localhost:8081",
-			Prefix: "/products",
-		},
-		{
-			Name:   "order-service",
-			URL:    "http://localhost:8082",
-			Prefix: "/orders",
-		},
+	// Connect to Consul
+	consul, err := discovery.NewConsulClient("localhost", 8500)
+	if err != nil {
+		log.Fatalf("Failed to connect to Consul: %v", err)
 	}
 
 	// Create gateway
-	gateway := NewGateway(services)
+	gateway := NewGateway(consul)
 
 	// Setup router
 	router := gin.Default()
 
-	// Gateway health check
+	// Gateway endpoints
 	router.GET("/health", gateway.HealthCheck)
+	router.GET("/services", gateway.ListServices)
 
-	// Proxy all other requests
-	router.Any("/products", gateway.ProxyRequest)
-	router.Any("/products/*path", gateway.ProxyRequest)
-	router.Any("/orders", gateway.ProxyRequest)
-	router.Any("/orders/*path", gateway.ProxyRequest)
+	// Proxy routes
+	router.Any("/products", gateway.ProxyProducts)
+	router.Any("/products/*path", gateway.ProxyProducts)
+	router.Any("/orders", gateway.ProxyOrders)
+	router.Any("/orders/*path", gateway.ProxyOrders)
 
-	// Start gateway on port 8080
+	// Start gateway
 	log.Println("🚀 API Gateway starting on http://localhost:8080")
-	log.Println("   Routes:")
-	log.Println("   /products/* → Product Service (8081)")
-	log.Println("   /orders/*   → Order Service (8082)")
+	log.Println("   Using Consul for service discovery")
 	router.Run(":8080")
 }
