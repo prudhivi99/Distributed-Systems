@@ -2,6 +2,9 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -9,8 +12,15 @@ import (
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/cache"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/consumer"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/db"
+	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/discovery"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/handlers"
 	"github.com/prudhivi99/Distributed-Systems/minisys-go/internal/messaging"
+)
+
+const (
+	serviceName = "product-service"
+	serviceID   = "product-service-1"
+	servicePort = 8081
 )
 
 func main() {
@@ -35,6 +45,33 @@ func main() {
 	}
 	defer rabbitMQ.Close()
 
+	// Connect to Consul
+	consul, err := discovery.NewConsulClient("localhost", 8500)
+	if err != nil {
+		log.Fatalf("Failed to connect to Consul: %v", err)
+	}
+
+	// Register with Consul
+	err = consul.Register(discovery.ServiceConfig{
+		Name: serviceName,
+		ID:   serviceID,
+		Port: servicePort,
+		Tags: []string{"api", "products"},
+	})
+	if err != nil {
+		log.Fatalf("Failed to register service: %v", err)
+	}
+
+	// Deregister on shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		log.Println("Shutting down...")
+		consul.Deregister(serviceID)
+		os.Exit(0)
+	}()
+
 	// Create repositories
 	productRepo := db.NewProductRepository(database)
 	cachedRepo := db.NewCachedProductRepository(productRepo, redisCache)
@@ -42,7 +79,7 @@ func main() {
 	// Create handler
 	productHandler := handlers.NewProductHandler(cachedRepo)
 
-	// Start event consumer in goroutine (pass cache for invalidation)
+	// Start event consumer
 	go startEventConsumer(rabbitMQ, productRepo, redisCache)
 
 	// Setup router
@@ -55,24 +92,21 @@ func main() {
 	router.DELETE("/products/:id", productHandler.DeleteProduct)
 
 	// Start server
-	log.Println("🚀 Product Service starting on http://localhost:8081")
-	log.Println("   Consuming events from RabbitMQ")
+	log.Printf("🚀 %s starting on http://localhost:%d", serviceName, servicePort)
+	log.Println("   Registered with Consul")
 	router.Run(":8081")
 }
 
 func startEventConsumer(mq *messaging.RabbitMQ, repo *db.ProductRepository, cache *cache.RedisCache) {
-	// Declare queue
 	if err := mq.DeclareQueue("order.created"); err != nil {
 		log.Fatalf("Failed to declare queue: %v", err)
 	}
 
-	// Start consuming
 	messages, err := mq.Consume("order.created")
 	if err != nil {
 		log.Fatalf("Failed to consume messages: %v", err)
 	}
 
-	// Process messages (pass cache for invalidation)
 	inventoryConsumer := consumer.NewInventoryConsumer(repo, cache)
 	inventoryConsumer.ProcessOrderCreated(messages)
 }
